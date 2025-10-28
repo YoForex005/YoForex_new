@@ -1,5 +1,5 @@
 modules = ["nodejs-20", "web", "postgresql-16"]
-run = "bash start-hybrid.sh"
+run = "bash scripts/start-hybrid.sh"
 hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
 
 [nix]
@@ -63,7 +63,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "bash start-nextjs-only.sh"
+args = "bash scripts/start-nextjs-only.sh"
 waitForPort = 5000
 
 [workflows.workflow.metadata]
