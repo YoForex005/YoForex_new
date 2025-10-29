@@ -98,11 +98,14 @@ import {
   type InsertContentRevision,
   type UserActivity,
   type InsertUserActivity,
+  type Feedback,
+  type InsertFeedback,
   users,
   userActivity,
   coinTransactions,
   rechargeOrders,
   withdrawalRequests,
+  feedback,
   content,
   contentPurchases,
   contentReviews,
@@ -161,6 +164,15 @@ import { applySEOAutomations, generateUniqueSlug, generateThreadSlug, generateRe
 import { db } from "./db";
 import { eq, and, or, desc, asc, sql, count, inArray, gt, gte, lte, ilike, lt, ne } from "drizzle-orm";
 
+/**
+ * Calculate user level based on total coins
+ * Level = floor(totalCoins / 1000)
+ * Examples: 0 coins=level 0, 1000 coins=level 1, 2500 coins=level 2, 10000 coins=level 10
+ */
+function calculateUserLevel(totalCoins: number): number {
+  return Math.floor(totalCoins / 1000);
+}
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<any>;
@@ -213,6 +225,7 @@ export interface IStorage {
   getBroker(id: string): Promise<Broker | undefined>;
   getBrokerBySlug(slug: string): Promise<Broker | undefined>;
   getAllBrokers(filters?: { isVerified?: boolean; status?: string }): Promise<Broker[]>;
+  searchBrokers(query: string, limit?: number): Promise<Broker[]>;
   
   createBrokerReview(review: InsertBrokerReview): Promise<BrokerReview>;
   getBrokerReview(reviewId: string): Promise<BrokerReview | null>;
@@ -328,7 +341,7 @@ export interface IStorage {
   getUserStats(userId: string): Promise<{
     threadsCreated: number;
     repliesPosted: number;
-    likesReceived: number;
+    helpfulVotes: number;
     bestAnswers: number;
     contentSales: number;
     followersCount: number;
@@ -635,7 +648,7 @@ export interface IStorage {
   /**
    * Assign report to moderator
    */
-  assignReport(reportId: number, assignedTo: string): Promise<void>;
+  assignReport(reportId: number, assignedTo: string, assignedBy: string): Promise<void>;
   
   /**
    * Resolve a report
@@ -1299,6 +1312,26 @@ export interface IStorage {
    * Restore content revision
    */
   restoreContentRevision(revisionId: number, restoredBy: string): Promise<void>;
+  
+  /**
+   * Create feedback submission
+   */
+  createFeedback(feedback: InsertFeedback): Promise<Feedback>;
+  
+  /**
+   * Get all feedback (admin)
+   */
+  listFeedback(filters?: { status?: string; type?: string; limit?: number }): Promise<Feedback[]>;
+  
+  /**
+   * Get feedback by user
+   */
+  getUserFeedback(userId: string): Promise<Feedback[]>;
+  
+  /**
+   * Update feedback status (admin)
+   */
+  updateFeedbackStatus(id: string, status: string, adminNotes?: string): Promise<void>;
 }
 
 export class MemStorage implements IStorage {
@@ -1484,7 +1517,12 @@ export class MemStorage implements IStorage {
     const user = this.users.get(userId);
     if (!user) return undefined;
     
-    const updatedUser = { ...user, totalCoins: user.totalCoins + coins };
+    const newTotalCoins = user.totalCoins + coins;
+    const updatedUser = { 
+      ...user, 
+      totalCoins: newTotalCoins,
+      level: calculateUserLevel(newTotalCoins)
+    };
     this.users.set(userId, updatedUser);
     return updatedUser;
   }
@@ -1576,15 +1614,15 @@ export class MemStorage implements IStorage {
     
     // Calculate new totals
     const newMinutes = activity.activeMinutes + minutes;
-    const cappedMinutes = Math.min(newMinutes, 100); // Max 100 minutes per day
-    const minutesAdded = cappedMinutes - activity.activeMinutes;
+    const cappedMinutes = Math.min(newMinutes, 500); // Max 500 minutes per day
     
-    // Award coins: 1 coin per 5 minutes (12 coins per hour, max 20 per day)
-    const newCoins = Math.floor(minutesAdded / 5);
+    // Award coins: 0.5 coins per 5 minutes = cappedMinutes / 10 (max 50 coins per day)
+    const totalCoinsEarned = cappedMinutes / 10;
+    const newCoins = totalCoinsEarned - activity.coinsEarned;
     
     // Update activity record
     activity.activeMinutes = cappedMinutes;
-    activity.coinsEarned += newCoins;
+    activity.coinsEarned = totalCoinsEarned;
     activity.lastActivityAt = new Date();
     this.userActivity.set(activity.id, activity);
     
@@ -1665,9 +1703,11 @@ export class MemStorage implements IStorage {
     this.transactions.set(id, transaction);
     
     // Update user's coin balance and stats
+    const newTotalCoins = user.totalCoins + balanceChange;
     const updatedUser = {
       ...user,
-      totalCoins: user.totalCoins + balanceChange,
+      totalCoins: newTotalCoins,
+      level: calculateUserLevel(newTotalCoins),
       weeklyEarned: insertTransaction.type === "earn" || insertTransaction.type === "recharge"
         ? user.weeklyEarned + Math.abs(insertTransaction.amount)
         : user.weeklyEarned
@@ -2159,6 +2199,30 @@ export class MemStorage implements IStorage {
     }
     
     return brokerList.sort((a, b) => (b.overallRating || 0) - (a.overallRating || 0));
+  }
+
+  async searchBrokers(query: string, limit: number = 10): Promise<Broker[]> {
+    const lowerQuery = query.toLowerCase().trim();
+    if (!lowerQuery) return [];
+    
+    const brokerList = Array.from(this.brokers.values())
+      .filter((b) => b.status === 'approved') // Only show approved brokers
+      .filter((b) => 
+        b.name.toLowerCase().includes(lowerQuery) ||
+        (b.websiteUrl && b.websiteUrl.toLowerCase().includes(lowerQuery))
+      )
+      .sort((a, b) => {
+        // Prioritize exact matches
+        const aExact = a.name.toLowerCase() === lowerQuery ? 1 : 0;
+        const bExact = b.name.toLowerCase() === lowerQuery ? 1 : 0;
+        if (aExact !== bExact) return bExact - aExact;
+        
+        // Then by rating
+        return (b.overallRating || 0) - (a.overallRating || 0);
+      })
+      .slice(0, limit);
+    
+    return brokerList;
   }
   
   async createBrokerReview(insertReview: InsertBrokerReview): Promise<BrokerReview> {
@@ -2808,7 +2872,9 @@ export class MemStorage implements IStorage {
 
     // Award coins
     if (coinsToAward > 0) {
-      user.totalCoins = (user.totalCoins || 0) + coinsToAward;
+      const newTotalCoins = (user.totalCoins || 0) + coinsToAward;
+      user.totalCoins = newTotalCoins;
+      user.level = calculateUserLevel(newTotalCoins);
     }
   }
 
@@ -2835,7 +2901,7 @@ export class MemStorage implements IStorage {
   async getUserStats(userId: string): Promise<{
     threadsCreated: number;
     repliesPosted: number;
-    likesReceived: number;
+    helpfulVotes: number;
     bestAnswers: number;
     contentSales: number;
     followersCount: number;
@@ -2847,10 +2913,16 @@ export class MemStorage implements IStorage {
     const contentSales = Array.from(this.contentPurchases.values()).filter(p => p.sellerId === userId).length;
     const followersCount = Array.from(this.userFollowsMap.values()).filter(f => f.followingId === userId).length;
     
+    // Calculate helpful votes from threads and replies created by user
+    const userThreads = Array.from(this.forumThreadsMap.values()).filter(t => t.authorId === userId);
+    const userReplies = Array.from(this.forumRepliesMap.values()).filter(r => r.userId === userId);
+    const helpfulVotes = userThreads.reduce((sum, t) => sum + (t.helpfulVotes || 0), 0) + 
+                        userReplies.reduce((sum, r) => sum + (r.helpfulVotes || 0), 0);
+    
     return {
       threadsCreated,
       repliesPosted,
-      likesReceived: 0,
+      helpfulVotes,
       bestAnswers: 0,
       contentSales,
       followersCount,
@@ -3106,7 +3178,12 @@ export class MemStorage implements IStorage {
   async adjustUserCoins(userId: string, amount: number, reason: string, adminId: string): Promise<void> {
     const user = this.users.get(userId);
     if (user) {
-      this.users.set(userId, { ...user, totalCoins: user.totalCoins + amount });
+      const newTotalCoins = user.totalCoins + amount;
+      this.users.set(userId, { 
+        ...user, 
+        totalCoins: newTotalCoins,
+        level: calculateUserLevel(newTotalCoins)
+      });
     }
   }
 
@@ -3206,7 +3283,7 @@ export class MemStorage implements IStorage {
     return { id: 1, ...report, status: 'pending' };
   }
 
-  async assignReport(reportId: number, assignedTo: string): Promise<void> {
+  async assignReport(reportId: number, assignedTo: string, assignedBy: string): Promise<void> {
     throw new Error("Not implemented in MemStorage");
   }
 
@@ -3661,6 +3738,35 @@ export class MemStorage implements IStorage {
   async restoreContentRevision(revisionId: number, restoredBy: string): Promise<void> {
     throw new Error("Not implemented in MemStorage");
   }
+
+  async createFeedback(data: InsertFeedback): Promise<Feedback> {
+    const feedbackItem: Feedback = {
+      id: randomUUID(),
+      userId: data.userId ?? null,
+      type: data.type,
+      subject: data.subject,
+      message: data.message,
+      email: data.email ?? null,
+      status: "new",
+      priority: "medium",
+      adminNotes: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    return feedbackItem;
+  }
+
+  async listFeedback(filters?: { status?: string; type?: string; limit?: number }): Promise<Feedback[]> {
+    return [];
+  }
+
+  async getUserFeedback(userId: string): Promise<Feedback[]> {
+    return [];
+  }
+
+  async updateFeedbackStatus(id: string, status: string, adminNotes?: string): Promise<void> {
+    return Promise.resolve();
+  }
 }
 
 export class DrizzleStorage implements IStorage {
@@ -3758,7 +3864,10 @@ export class DrizzleStorage implements IStorage {
   async updateUserCoins(userId: string, coins: number): Promise<User | undefined> {
     const [user] = await db
       .update(users)
-      .set({ totalCoins: sql`${users.totalCoins} + ${coins}` })
+      .set({ 
+        totalCoins: sql`${users.totalCoins} + ${coins}`,
+        level: sql`FLOOR((${users.totalCoins} + ${coins}) / 1000)`
+      })
       .where(eq(users.id, userId))
       .returning();
     return user;
@@ -3838,11 +3947,12 @@ export class DrizzleStorage implements IStorage {
       )
     });
 
-    // Calculate coins to award (1 coin per 5 minutes, max 20 coins/day)
+    // Calculate coins to award (0.5 coins per 5 minutes, max 50 coins/day)
     const newMinutes = (activity?.activeMinutes || 0) + minutes;
-    const maxMinutes = 100; // 100 minutes = 20 coins max
+    const maxMinutes = 500; // 500 minutes = 50 coins max (0.5 coins per 5 minutes)
     const cappedMinutes = Math.min(newMinutes, maxMinutes);
-    const totalCoinsEarned = Math.floor(cappedMinutes / 5);
+    // Formula: 0.5 coins per 5 minutes = minutes / 10
+    const totalCoinsEarned = cappedMinutes / 10;
     const previousCoins = activity?.coinsEarned || 0;
     const newCoins = totalCoinsEarned - previousCoins;
 
@@ -3869,7 +3979,10 @@ export class DrizzleStorage implements IStorage {
     // Award coins if any new coins earned
     if (newCoins > 0) {
       await db.update(users)
-        .set({ totalCoins: sql`${users.totalCoins} + ${newCoins}` })
+        .set({ 
+          totalCoins: sql`${users.totalCoins} + ${newCoins}`,
+          level: sql`FLOOR((${users.totalCoins} + ${newCoins}) / 1000)`
+        })
         .where(eq(users.id, userId));
 
       await db.insert(coinTransactions).values({
@@ -3944,6 +4057,7 @@ export class DrizzleStorage implements IStorage {
       .update(users)
       .set({ 
         totalCoins: sql`${users.totalCoins} + ${balanceChange}`,
+        level: sql`FLOOR((${users.totalCoins} + ${balanceChange}) / 1000)`,
         weeklyEarned: insertTransaction.type === "earn" || insertTransaction.type === "recharge"
           ? sql`${users.weeklyEarned} + ${Math.abs(insertTransaction.amount)}`
           : users.weeklyEarned
@@ -4316,6 +4430,7 @@ export class DrizzleStorage implements IStorage {
       await tx.update(users)
         .set({ 
           totalCoins: sql`${users.totalCoins} + 1`,
+          level: sql`FLOOR((${users.totalCoins} + 1) / 1000)`,
           weeklyEarned: sql`${users.weeklyEarned} + 1`
         })
         .where(eq(users.id, insertLike.userId));
@@ -4394,6 +4509,25 @@ export class DrizzleStorage implements IStorage {
     }
     
     return await query.orderBy(desc(brokers.overallRating));
+  }
+
+  async searchBrokers(query: string, limit: number = 10): Promise<Broker[]> {
+    const lowerQuery = query.toLowerCase().trim();
+    if (!lowerQuery) return [];
+    
+    const results = await db
+      .select()
+      .from(brokers)
+      .where(
+        and(
+          eq(brokers.status, 'approved'),
+          sql`LOWER(${brokers.name}) LIKE ${`%${lowerQuery}%`}`
+        )
+      )
+      .orderBy(desc(brokers.overallRating))
+      .limit(limit);
+    
+    return results;
   }
 
   async createBrokerReview(insertReview: InsertBrokerReview): Promise<BrokerReview> {
@@ -4506,8 +4640,28 @@ export class DrizzleStorage implements IStorage {
   }
   
   async getForumThreadBySlug(slug: string): Promise<ForumThread | undefined> {
-    const [thread] = await db.select().from(forumThreads).where(eq(forumThreads.slug, slug));
+    const [result] = await db
+      .select({
+        thread: forumThreads,
+        authorUsername: users.username,
+        authorFirstName: users.firstName,
+        authorLastName: users.lastName,
+      })
+      .from(forumThreads)
+      .leftJoin(users, eq(forumThreads.authorId, users.id))
+      .where(eq(forumThreads.slug, slug));
     
+    if (!result) return undefined;
+    
+    const thread = result.thread;
+    
+    // Get accurate reply count from database
+    const [{ count: actualReplyCount }] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(forumReplies)
+      .where(eq(forumReplies.threadId, thread.id));
+    
+    // Increment view count
     if (thread) {
       await db
         .update(forumThreads)
@@ -4515,7 +4669,14 @@ export class DrizzleStorage implements IStorage {
         .where(eq(forumThreads.id, thread.id));
     }
     
-    return thread;
+    // Return thread with author data merged in and accurate reply count
+    return {
+      ...thread,
+      replyCount: actualReplyCount,
+      authorUsername: result.authorUsername,
+      authorFirstName: result.authorFirstName,
+      authorLastName: result.authorLastName,
+    } as ForumThread;
   }
   
   async listForumThreads(filters?: { categorySlug?: string; status?: string; isPinned?: boolean; limit?: number }): Promise<ForumThread[]> {
@@ -4618,11 +4779,25 @@ export class DrizzleStorage implements IStorage {
   }
   
   async listForumReplies(threadId: string): Promise<ForumReply[]> {
-    return await db
-      .select()
+    const results = await db
+      .select({
+        reply: forumReplies,
+        authorUsername: users.username,
+        authorFirstName: users.firstName,
+        authorLastName: users.lastName,
+      })
       .from(forumReplies)
+      .leftJoin(users, eq(forumReplies.userId, users.id))
       .where(eq(forumReplies.threadId, threadId))
       .orderBy(forumReplies.createdAt);
+    
+    // Return replies with author data merged in
+    return results.map(result => ({
+      ...result.reply,
+      authorUsername: result.authorUsername,
+      authorFirstName: result.authorFirstName,
+      authorLastName: result.authorLastName,
+    } as ForumReply));
   }
   
   async markReplyAsAccepted(replyId: string): Promise<ForumReply | null> {
@@ -5312,7 +5487,7 @@ export class DrizzleStorage implements IStorage {
   async getUserStats(userId: string): Promise<{
     threadsCreated: number;
     repliesPosted: number;
-    likesReceived: number;
+    helpfulVotes: number;
     bestAnswers: number;
     contentSales: number;
     followersCount: number;
@@ -5342,11 +5517,24 @@ export class DrizzleStorage implements IStorage {
     const followersCount = await db.select({ count: count(userFollows.id) })
       .from(userFollows)
       .where(eq(userFollows.followingId, userId));
+    
+    // Sum helpful votes from threads and replies created by user
+    const threadVotes = await db.select({ 
+      total: sql<number>`COALESCE(SUM(${forumThreads.helpfulVotes}), 0)` 
+    })
+      .from(forumThreads)
+      .where(eq(forumThreads.authorId, userId));
+    
+    const replyVotes = await db.select({ 
+      total: sql<number>`COALESCE(SUM(${forumReplies.helpfulVotes}), 0)` 
+    })
+      .from(forumReplies)
+      .where(eq(forumReplies.userId, userId));
 
     return {
       threadsCreated: threadsCount[0]?.count || 0,
       repliesPosted: repliesCount[0]?.count || 0,
-      likesReceived: 0, // TODO: Implement likes tracking
+      helpfulVotes: (threadVotes[0]?.total || 0) + (replyVotes[0]?.total || 0),
       bestAnswers: 0, // TODO: Implement best answers tracking
       contentSales: salesCount[0]?.count || 0,
       followersCount: followersCount[0]?.count || 0,
@@ -5757,9 +5945,13 @@ export class DrizzleStorage implements IStorage {
       adminNotes: data.adminNotes,
     }).returning();
 
+    const newTotalCoins = user.totalCoins - data.amount;
     await db
       .update(users)
-      .set({ totalCoins: user.totalCoins - data.amount })
+      .set({ 
+        totalCoins: newTotalCoins,
+        level: calculateUserLevel(newTotalCoins)
+      })
       .where(eq(users.id, userId));
 
     return withdrawal;
@@ -5811,9 +6003,13 @@ export class DrizzleStorage implements IStorage {
 
     const user = await this.getUser(userId);
     if (user) {
+      const newTotalCoins = user.totalCoins + withdrawal.amount;
       await db
         .update(users)
-        .set({ totalCoins: user.totalCoins + withdrawal.amount })
+        .set({ 
+          totalCoins: newTotalCoins,
+          level: calculateUserLevel(newTotalCoins)
+        })
         .where(eq(users.id, userId));
     }
 
@@ -6304,7 +6500,10 @@ export class DrizzleStorage implements IStorage {
       await db.transaction(async (tx) => {
         await tx
           .update(users)
-          .set({ totalCoins: sql`${users.totalCoins} + ${amount}` })
+          .set({ 
+            totalCoins: sql`${users.totalCoins} + ${amount}`,
+            level: sql`FLOOR((${users.totalCoins} + ${amount}) / 1000)`
+          })
           .where(eq(users.id, userId));
         
         await tx.insert(coinTransactions).values({
@@ -7207,9 +7406,13 @@ export class DrizzleStorage implements IStorage {
           status: 'completed',
         }).returning();
         
+        const balanceChange = type === 'spend' ? -amount : amount;
         await tx
           .update(users)
-          .set({ totalCoins: sql`${users.totalCoins} + ${type === 'spend' ? -amount : amount}` })
+          .set({ 
+            totalCoins: sql`${users.totalCoins} + ${balanceChange}`,
+            level: sql`FLOOR((${users.totalCoins} + ${balanceChange}) / 1000)`
+          })
           .where(eq(users.id, userId));
         
         await tx.insert(adminActions).values({
@@ -7293,7 +7496,10 @@ export class DrizzleStorage implements IStorage {
           // Refund coins
           await tx
             .update(users)
-            .set({ totalCoins: sql`${users.totalCoins} + ${withdrawal.amount}` })
+            .set({ 
+              totalCoins: sql`${users.totalCoins} + ${withdrawal.amount}`,
+              level: sql`FLOOR((${users.totalCoins} + ${withdrawal.amount}) / 1000)`
+            })
             .where(eq(users.id, withdrawal.userId));
           
           await tx.insert(adminActions).values({
@@ -7466,7 +7672,10 @@ export class DrizzleStorage implements IStorage {
       return await db.transaction(async (tx) => {
         await tx
           .update(users)
-          .set({ totalCoins: sql`${users.totalCoins} + ${refund.amount}` })
+          .set({ 
+            totalCoins: sql`${users.totalCoins} + ${refund.amount}`,
+            level: sql`FLOOR((${users.totalCoins} + ${refund.amount}) / 1000)`
+          })
           .where(eq(users.id, refund.userId));
         
         const [transaction] = await tx.insert(coinTransactions).values({
@@ -9098,6 +9307,88 @@ export class DrizzleStorage implements IStorage {
       });
     } catch (error) {
       console.error("Error restoring content revision:", error);
+      throw error;
+    }
+  }
+
+  async createFeedback(data: InsertFeedback): Promise<Feedback> {
+    try {
+      const [newFeedback] = await db
+        .insert(feedback)
+        .values({
+          userId: data.userId ?? null,
+          type: data.type,
+          subject: data.subject,
+          message: data.message,
+          email: data.email ?? null,
+        })
+        .returning();
+      return newFeedback;
+    } catch (error) {
+      console.error("Error creating feedback:", error);
+      throw error;
+    }
+  }
+
+  async listFeedback(filters?: { status?: string; type?: string; limit?: number }): Promise<Feedback[]> {
+    try {
+      let query = db.select().from(feedback);
+
+      const conditions = [];
+      if (filters?.status) {
+        conditions.push(eq(feedback.status, filters.status as any));
+      }
+      if (filters?.type) {
+        conditions.push(eq(feedback.type, filters.type as any));
+      }
+
+      if (conditions.length > 0) {
+        query = query.where(and(...conditions)) as any;
+      }
+
+      query = query.orderBy(desc(feedback.createdAt)) as any;
+
+      if (filters?.limit) {
+        query = query.limit(filters.limit) as any;
+      }
+
+      return await query;
+    } catch (error) {
+      console.error("Error listing feedback:", error);
+      throw error;
+    }
+  }
+
+  async getUserFeedback(userId: string): Promise<Feedback[]> {
+    try {
+      return await db
+        .select()
+        .from(feedback)
+        .where(eq(feedback.userId, userId))
+        .orderBy(desc(feedback.createdAt));
+    } catch (error) {
+      console.error("Error getting user feedback:", error);
+      throw error;
+    }
+  }
+
+  async updateFeedbackStatus(id: string, status: string, adminNotes?: string): Promise<void> {
+    try {
+      const updates: any = {
+        status: status as any,
+        updatedAt: new Date(),
+      };
+      
+      if (adminNotes !== undefined) {
+        updates.adminNotes = adminNotes;
+      }
+
+      await db
+        .update(feedback)
+        .set(updates)
+        .where(eq(feedback.id, id));
+    } catch (error) {
+      console.error("Error updating feedback status:", error);
       throw error;
     }
   }

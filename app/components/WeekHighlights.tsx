@@ -8,6 +8,7 @@ import { formatDistanceToNow } from "date-fns";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import type { ForumThread } from "../../shared/schema";
+import { RefreshButton } from "./RefreshButton";
 
 interface HighlightThread {
   id: string;
@@ -27,6 +28,8 @@ interface WeekHighlightsProps {
   solvedThreads?: HighlightThread[];
 }
 
+const REFERENCE_DATE = new Date('2025-10-28T12:00:00Z');
+
 const defaultNewThreads: HighlightThread[] = [
   {
     id: "1",
@@ -36,7 +39,7 @@ const defaultNewThreads: HighlightThread[] = [
     replies: 12,
     views: 890,
     coins: 23,
-    lastActivity: new Date(Date.now() - 30 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 30 * 60 * 1000)
   },
   {
     id: "2",
@@ -46,7 +49,7 @@ const defaultNewThreads: HighlightThread[] = [
     replies: 8,
     views: 456,
     coins: 15,
-    lastActivity: new Date(Date.now() - 1 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 1 * 60 * 60 * 1000)
   },
   {
     id: "3",
@@ -56,7 +59,7 @@ const defaultNewThreads: HighlightThread[] = [
     replies: 6,
     views: 234,
     coins: 12,
-    lastActivity: new Date(Date.now() - 2 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 2 * 60 * 60 * 1000)
   }
 ];
 
@@ -70,7 +73,7 @@ const defaultTrendingThreads: HighlightThread[] = [
     views: 5670,
     coins: 92,
     isAnswered: true,
-    lastActivity: new Date(Date.now() - 3 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 3 * 60 * 60 * 1000)
   },
   {
     id: "5",
@@ -80,7 +83,7 @@ const defaultTrendingThreads: HighlightThread[] = [
     replies: 67,
     views: 4320,
     coins: 78,
-    lastActivity: new Date(Date.now() - 4 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 4 * 60 * 60 * 1000)
   },
   {
     id: "6",
@@ -91,7 +94,7 @@ const defaultTrendingThreads: HighlightThread[] = [
     views: 8900,
     coins: 56,
     isAnswered: true,
-    lastActivity: new Date(Date.now() - 5 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 5 * 60 * 60 * 1000)
   }
 ];
 
@@ -105,7 +108,7 @@ const defaultSolvedThreads: HighlightThread[] = [
     views: 3210,
     coins: 41,
     isAnswered: true,
-    lastActivity: new Date(Date.now() - 6 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 6 * 60 * 60 * 1000)
   },
   {
     id: "8",
@@ -116,7 +119,7 @@ const defaultSolvedThreads: HighlightThread[] = [
     views: 1890,
     coins: 34,
     isAnswered: true,
-    lastActivity: new Date(Date.now() - 7 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 7 * 60 * 60 * 1000)
   },
   {
     id: "9",
@@ -127,7 +130,7 @@ const defaultSolvedThreads: HighlightThread[] = [
     views: 2670,
     coins: 48,
     isAnswered: true,
-    lastActivity: new Date(Date.now() - 8 * 60 * 60 * 1000)
+    lastActivity: new Date(REFERENCE_DATE.getTime() - 8 * 60 * 60 * 1000)
   }
 ];
 
@@ -138,38 +141,47 @@ export default function WeekHighlights({
 }: WeekHighlightsProps) {
   const router = useRouter();
 
-  // Fetch real trending threads from API (uses relative URL for Next.js rewrite)
-  const { data: trendingData } = useQuery<ForumThread[]>({
+  // Fetch real trending threads from API (no auto-refresh for performance)
+  const { data: trendingData, refetch: refetchTrending } = useQuery<ForumThread[]>({
     queryKey: ['/api/threads', { sortBy: 'trending', limit: 3 }],
     queryFn: async () => {
       const res = await fetch('/api/threads?sortBy=trending&limit=3', { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch trending threads');
       return res.json();
     },
-    refetchInterval: 60000, // Refresh every minute
+    staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
-  // Fetch newest threads (uses relative URL for Next.js rewrite)
-  const { data: newData } = useQuery<ForumThread[]>({
+  // Fetch newest threads (no auto-refresh for performance)
+  const { data: newData, refetch: refetchNew } = useQuery<ForumThread[]>({
     queryKey: ['/api/threads', { sortBy: 'newest', limit: 3 }],
     queryFn: async () => {
       const res = await fetch('/api/threads?sortBy=newest&limit=3', { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch newest threads');
       return res.json();
     },
-    refetchInterval: 60000,
+    staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
-  // Fetch solved threads (answered) (uses relative URL for Next.js rewrite)
-  const { data: solvedData } = useQuery<ForumThread[]>({
+  // Fetch solved threads (answered) (no auto-refresh for performance)
+  const { data: solvedData, refetch: refetchSolved } = useQuery<ForumThread[]>({
     queryKey: ['/api/threads', { sortBy: 'answered', limit: 3 }],
     queryFn: async () => {
       const res = await fetch('/api/threads?sortBy=answered&limit=3', { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch answered threads');
       return res.json();
     },
-    refetchInterval: 60000,
+    staleTime: 5 * 60 * 1000, // 5 minutes
   });
+
+  // Refresh all tabs
+  const handleRefreshAll = async () => {
+    await Promise.all([
+      refetchNew(),
+      refetchTrending(),
+      refetchSolved()
+    ]);
+  };
 
   // Store full thread data for navigation
   const threadsWithSlug = new Map<string, ForumThread>();
@@ -284,7 +296,7 @@ export default function WeekHighlights({
 
                 <div className="flex items-center gap-1.5">
                   <Clock className="h-3.5 w-3.5 text-orange-500/70" />
-                  <span>{formatDistanceToNow(thread.lastActivity, { addSuffix: true })}</span>
+                  <span suppressHydrationWarning>{formatDistanceToNow(thread.lastActivity, { addSuffix: true })}</span>
                 </div>
               </div>
             </div>
@@ -317,9 +329,16 @@ export default function WeekHighlights({
     <Card data-testid="card-week-highlights" className="overflow-hidden">
       <CardContent className="p-0">
         {/* Header */}
-        <div className="flex items-center gap-2 p-5 pb-4 border-b bg-gradient-to-br from-primary/5 to-primary/0">
-          <TrendingUp className="h-5 w-5 text-primary" />
-          <h3 className="font-semibold text-base">This Week's Highlights</h3>
+        <div className="flex items-center justify-between gap-2 p-5 pb-4 border-b bg-gradient-to-br from-primary/5 to-primary/0">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-primary" />
+            <h3 className="font-semibold text-base">This Week's Highlights</h3>
+          </div>
+          <RefreshButton 
+            onRefresh={handleRefreshAll}
+            size="icon"
+            variant="ghost"
+          />
         </div>
         
         {/* Tabs */}

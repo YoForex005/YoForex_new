@@ -10,11 +10,12 @@ import type { Request, Response } from "express";
 
 /**
  * General API rate limiter - applies to all API endpoints
- * 100 requests per 15 minutes per IP
+ * 500 requests per 15 minutes per IP
+ * Increased limit for better development experience and normal user browsing
  */
 export const generalApiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // 100 requests per window
+  max: 500, // 500 requests per window (increased from 100 for better UX)
   message: {
     error: "Too many requests, please try again later",
     retryAfter: "15 minutes",
@@ -152,6 +153,29 @@ export const adminOperationLimiter = rateLimit({
     res.status(429).json({
       error: "Too many admin operations. Please slow down",
       retryAfter: "1 hour",
+    });
+  },
+});
+
+/**
+ * Activity tracking rate limiter
+ * 1 request per minute to prevent coin farming abuse
+ * This prevents rapid-fire requests from malicious scripts
+ */
+export const activityTrackingLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 1, // 1 request per minute
+  message: {
+    error: "Activity tracking is rate limited. Please wait before sending another heartbeat.",
+    retryAfter: "1 minute",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: false, // Count all requests, even successful ones
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      error: "Too many activity tracking requests. Please wait 1 minute between heartbeats.",
+      retryAfter: "1 minute",
     });
   },
 });

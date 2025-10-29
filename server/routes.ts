@@ -22,6 +22,7 @@ import {
   insertUserFollowSchema,
   insertMessageSchema,
   updateUserProfileSchema,
+  insertFeedbackSchema,
   BADGE_METADATA,
   type BadgeType,
   coinTransactions,
@@ -42,6 +43,7 @@ import {
   contentCreationLimiter,
   reviewReplyLimiter,
   adminOperationLimiter,
+  activityTrackingLimiter,
 } from "./rateLimiting.js";
 import { generateSlug, generateFocusKeyword, generateMetaDescription as generateMetaDescriptionOld, generateImageAltTexts } from './seo.js';
 import { emailService } from './services/emailService.js';
@@ -213,25 +215,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // FEEDBACK ENDPOINT - Submit user feedback
   app.post("/api/feedback", async (req, res) => {
     try {
-      const { type, subject, message, email } = req.body;
+      // Extract userId from session (may be null for anonymous feedback)
+      const userId = req.isAuthenticated() ? (req.user as any)?.claims?.sub : null;
+
+      // 1. Validate with Zod schema using safeParse
+      const validationResult = insertFeedbackSchema.safeParse({
+        userId: userId,
+        type: req.body.type,
+        subject: req.body.subject,
+        message: req.body.message,
+        email: req.body.email,
+      });
       
-      if (!type || !subject || !message) {
-        return res.status(400).json({ error: "Type, subject, and message are required" });
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: validationResult.error.errors 
+        });
       }
-
-      console.log(`[FEEDBACK] New feedback received:`);
-      console.log(`  Type: ${type}`);
-      console.log(`  Subject: ${subject}`);
-      console.log(`  Message: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`);
-      console.log(`  Email: ${email || 'Not provided'}`);
-
-      // In a production app, you would:
-      // 1. Store in database
-      // 2. Send notification email to support team
-      // 3. Create support ticket
       
+      // 2. Sanitize inputs to prevent XSS (no HTML allowed in feedback)
+      const sanitized = sanitizeRequestBody(validationResult.data, []);
+      
+      // 3. Create feedback with sanitized data
+      const createdFeedback = await storage.createFeedback(sanitized);
+
+      console.log(`[FEEDBACK] New feedback created:`);
+      console.log(`  ID: ${createdFeedback.id}`);
+      console.log(`  Type: ${createdFeedback.type}`);
+      console.log(`  Subject: ${createdFeedback.subject}`);
+      console.log(`  User ID: ${createdFeedback.userId || 'Anonymous'}`);
+
       res.json({ 
-        success: true, 
+        success: true,
+        id: createdFeedback.id,
         message: "Feedback submitted successfully. Thank you for helping us improve!" 
       });
     } catch (error: any) {
@@ -1209,6 +1226,106 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
+  // POST /api/activity/track - Track user activity and award coins (SECURE VERSION)
+  // CRITICAL SECURITY: Uses server-side session timestamps to prevent coin farming
+  app.post("/api/activity/track", isAuthenticated, activityTrackingLimiter, async (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId(req);
+      
+      // Initialize session if not present
+      if (!req.session) {
+        return res.status(500).json({ error: "Session not initialized" });
+      }
+
+      const now = Date.now();
+      const sessionKey = `lastActivityPing_${userId}`;
+      const lastPing = req.session[sessionKey] as number | undefined;
+
+      // First ping - just set the timestamp, don't award coins
+      if (!lastPing) {
+        req.session[sessionKey] = now;
+        return res.json({
+          success: true,
+          coinsEarned: 0,
+          totalMinutes: 0,
+          dailyLimit: false,
+          message: "Activity tracking started",
+        });
+      }
+
+      // Calculate elapsed time in minutes (server-side calculation, cannot be spoofed)
+      const elapsedMs = now - lastPing;
+      const elapsedMinutes = Math.floor(elapsedMs / 60000);
+
+      // Cap at 5 minutes to prevent long idle time claims
+      // If more than 5 minutes passed, only count 5 minutes
+      const minutesToAward = Math.min(elapsedMinutes, 5);
+
+      // Ignore if less than 1 minute has passed (too soon)
+      if (minutesToAward < 1) {
+        return res.json({
+          success: true,
+          coinsEarned: 0,
+          totalMinutes: 0,
+          dailyLimit: false,
+          message: "Not enough time elapsed since last ping",
+        });
+      }
+
+      // Update the last ping timestamp
+      req.session[sessionKey] = now;
+
+      // Record activity with SERVER-CALCULATED minutes (not client-supplied)
+      const result = await storage.recordActivity(userId, minutesToAward);
+
+      // Create notification if coins were earned
+      if (result.coinsEarned > 0) {
+        await storage.createNotification({
+          userId,
+          type: "coin_earned",
+          title: "Activity Reward!",
+          message: `You earned ${result.coinsEarned} coins for being active!`,
+          read: false,
+        });
+
+        res.json({
+          success: true,
+          coinsEarned: result.coinsEarned,
+          totalMinutes: result.totalMinutes,
+          dailyLimit: false,
+        });
+      } else {
+        // Daily limit reached
+        res.json({
+          success: true,
+          coinsEarned: 0,
+          totalMinutes: result.totalMinutes,
+          dailyLimit: true,
+        });
+      }
+    } catch (error: any) {
+      if (error.message === "No authenticated user") {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET /api/activity/today - Get today's activity stats
+  app.get("/api/activity/today", isAuthenticated, async (req, res) => {
+    try {
+      const userId = getAuthenticatedUserId(req);
+      const activity = await storage.getTodayActivity(userId);
+      
+      res.json(activity || { activeMinutes: 0, coinsEarned: 0 });
+    } catch (error: any) {
+      if (error.message === "No authenticated user") {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+  
   // GET /api/coins/summary - Get earning breakdown
   app.get("/api/coins/summary", isAuthenticated, async (req, res) => {
     try {
@@ -1724,11 +1841,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const authenticatedUserId = getAuthenticatedUserId(req);
       
-      const validated = insertContentReviewSchema.parse(req.body);
-      // Override userId with authenticated user ID
-      validated.userId = authenticatedUserId;
+      // 1. Validate with Zod schema
+      const validationResult = insertContentReviewSchema.safeParse(req.body);
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: validationResult.error.errors 
+        });
+      }
       
-      const review = await storage.createReview(validated);
+      // 2. Sanitize inputs to prevent XSS (allow HTML in review field)
+      const sanitized = sanitizeRequestBody(validationResult.data, ['review']);
+      
+      // Override userId with authenticated user ID
+      sanitized.userId = authenticatedUserId;
+      
+      // 3. Create review with sanitized data
+      const review = await storage.createReview(sanitized);
       
       // Award 5 coins for review (pending moderation approval)
       // Note: Coins will be awarded when admin approves the review
@@ -1756,7 +1885,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(401).json({ error: "Not authenticated" });
         }
       }
-      res.status(400).json({ error: "Invalid review data" });
+      res.status(500).json({ error: "Invalid review data" });
     }
   });
   
@@ -1928,36 +2057,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json(brokers);
   });
 
-  // NEW: Search brokers with autocomplete (with logo auto-fetch)
+  // Search brokers with autocomplete (optimized)
   app.get("/api/brokers/search", async (req, res) => {
     try {
       const query = (req.query.q as string || '').trim();
+      const limit = parseInt(req.query.limit as string) || 10;
       
       if (!query) {
-        return res.json({ brokers: [] });
+        return res.json([]);
       }
 
-      // Get all brokers and filter by name
-      const allBrokers = await storage.getAllBrokers({});
+      // Use optimized search method
+      const matchingBrokers = await storage.searchBrokers(query, limit);
       
-      // Case-insensitive search
-      const matchingBrokers = allBrokers
-        .filter((broker: any) => 
-          broker.name.toLowerCase().includes(query.toLowerCase())
-        )
-        .slice(0, 5) // Return top 5 matches
-        .map((broker: any) => ({
-          id: broker.id,
-          name: broker.name,
-          slug: broker.slug,
-          websiteUrl: broker.websiteUrl,
-          logoUrl: broker.logoUrl || getPlaceholderLogo(broker.name),
-          isVerified: broker.isVerified,
-          overallRating: broker.overallRating,
-          reviewCount: broker.reviewCount,
-        }));
+      // Map to consistent response format with logo fallback
+      const results = matchingBrokers.map((broker: any) => ({
+        id: broker.id,
+        name: broker.name,
+        slug: broker.slug,
+        websiteUrl: broker.websiteUrl,
+        logoUrl: broker.logoUrl || getPlaceholderLogo(broker.name),
+        isVerified: broker.isVerified,
+        overallRating: broker.overallRating,
+        reviewCount: broker.reviewCount,
+      }));
 
-      res.json({ brokers: matchingBrokers });
+      res.json(results);
     } catch (error: any) {
       console.error('[Broker Search] Error:', error);
       res.status(500).json({ error: error.message || "Failed to search brokers" });
@@ -1997,7 +2122,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // NEW: Get platform-wide broker statistics
   app.get("/api/brokers/stats", async (req, res) => {
     try {
-      const allBrokers = await storage.getAllBrokers({ status: "approved" });
+      // Get all brokers (don't filter by status - show stats for all brokers)
+      const allBrokers = await storage.getAllBrokers();
       const verifiedBrokers = allBrokers.filter(b => b.isVerified);
       
       // Calculate total reviews and average rating
@@ -2130,18 +2256,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const authenticatedUserId = getAuthenticatedUserId(req);
       
-      const validated = insertBrokerReviewSchema.parse(req.body);
-      // Override userId with authenticated user ID
-      validated.userId = authenticatedUserId;
+      // 1. Validate with Zod schema
+      const validationResult = insertBrokerReviewSchema.safeParse(req.body);
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: validationResult.error.errors 
+        });
+      }
       
-      const review = await storage.createBrokerReview(validated);
+      // 2. Sanitize inputs to prevent XSS (allow HTML in reviewTitle and reviewBody)
+      const sanitized = sanitizeRequestBody(validationResult.data, ['reviewTitle', 'reviewBody']);
+      
+      // Override userId with authenticated user ID
+      sanitized.userId = authenticatedUserId;
+      
+      // 3. Create review with sanitized data
+      const review = await storage.createBrokerReview(sanitized);
       
       // Update broker's overall rating
-      await storage.updateBrokerRating(validated.brokerId);
+      await storage.updateBrokerRating(sanitized.brokerId);
       
       // AWARD COINS: Only for normal reviews (NOT scam reports)
       // Scam reports require admin verification before awarding coins
-      if (!validated.isScamReport) {
+      if (!sanitized.isScamReport) {
         try {
           await storage.beginLedgerTransaction(
             'earn',
@@ -2151,7 +2289,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 userId: authenticatedUserId,
                 direction: 'credit',
                 amount: 50,
-                memo: `Reviewed broker: ${validated.brokerId}`,
+                memo: `Reviewed broker: ${sanitized.brokerId}`,
               },
               {
                 userId: 'system',
@@ -2190,7 +2328,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(401).json({ error: "Not authenticated" });
         }
       }
-      res.status(400).json({ error: "Invalid review data" });
+      res.status(500).json({ error: "Invalid review data" });
     }
   });
 
@@ -2347,11 +2485,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const authenticatedUserId = getAuthenticatedUserId(req);
       
-      // Sanitize inputs - allow HTML in body only
-      const sanitized = sanitizeRequestBody(req.body, ['body']);
+      // 1. Validate schema (includes title 15-90 chars, body 150+ words, caps detection)
+      const validationResult = insertForumThreadSchema.safeParse(req.body);
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: validationResult.error.errors 
+        });
+      }
       
-      // Validate schema (includes title 15-90 chars, body 150+ words, caps detection)
-      const validated = insertForumThreadSchema.parse(sanitized);
+      // 2. Sanitize inputs - allow HTML in body only
+      const validated = sanitizeRequestBody(validationResult.data, ['body']);
       
       // Override authorId with authenticated user ID
       validated.authorId = authenticatedUserId;
@@ -2840,14 +2984,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const authenticatedUserId = getAuthenticatedUserId(req);
       
-      // Sanitize inputs - allow HTML in body only
-      const sanitized = sanitizeRequestBody(req.body, ['body']);
-      
-      // Validate schema
-      const validated = insertForumReplySchema.parse({
-        ...sanitized,
+      // 1. Validate schema
+      const validationResult = insertForumReplySchema.safeParse({
+        ...req.body,
         threadId: req.params.threadId,
       });
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: validationResult.error.errors 
+        });
+      }
+      
+      // 2. Sanitize inputs - allow HTML in body only
+      const validated = sanitizeRequestBody(validationResult.data, ['body']);
       // Override userId/authorId with authenticated user ID
       validated.userId = authenticatedUserId;
       
@@ -3598,7 +3748,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch("/api/user/profile", isAuthenticated, async (req, res) => {
     try {
       const authenticatedUserId = getAuthenticatedUserId(req);
-      const validated = updateUserProfileSchema.parse(req.body);
+      
+      // 1. Validate with Zod schema
+      const validationResult = updateUserProfileSchema.safeParse(req.body);
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          error: 'Validation failed', 
+          details: validationResult.error.errors 
+        });
+      }
+      
+      // 2. Sanitize inputs to prevent XSS (allow HTML in bio field)
+      const validated = sanitizeRequestBody(validationResult.data, ['bio']);
       
       // Separate fields for users table vs profiles table
       const userFields: any = {};
@@ -4968,33 +5129,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ===== Daily Earning System =====
+  // NOTE: Activity tracking endpoint is defined earlier with proper security measures
   
-  // Track user activity (5-minute intervals)
-  app.post('/api/activity/track', isAuthenticated, async (req, res) => {
-    try {
-      const userId = getAuthenticatedUserId(req);
-      const { minutes } = req.body;
-      
-      if (!minutes || minutes !== 5) {
-        return res.status(400).json({ message: 'Invalid minutes value. Must be 5.' });
-      }
-      
-      const result = await storage.recordActivity(userId, minutes);
-      const dailyLimit = result.totalMinutes >= 100;
-      
-      res.json({
-        success: true,
-        coinsEarned: result.coinsEarned,
-        totalMinutes: result.totalMinutes,
-        dailyLimit
-      });
-    } catch (error) {
-      console.error('Error tracking activity:', error);
-      res.status(500).json({ message: 'Failed to track activity' });
-    }
-  });
-  
-  // Get today's activity stats
+  // Get today's activity stats (DUPLICATE - consider removing if already exists above)
   app.get('/api/activity/today', isAuthenticated, async (req, res) => {
     try {
       const userId = getAuthenticatedUserId(req);

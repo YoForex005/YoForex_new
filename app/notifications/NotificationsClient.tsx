@@ -51,9 +51,7 @@ export default function NotificationsClient({ initialNotifications = [] }: Notif
 
   const markAsReadMutation = useMutation({
     mutationFn: async (notificationId: string) => {
-      return apiRequest(`/api/notifications/${notificationId}/read`, {
-        method: 'POST',
-      });
+      return apiRequest('POST', `/api/notifications/${notificationId}/read`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/notifications'] });
@@ -63,9 +61,7 @@ export default function NotificationsClient({ initialNotifications = [] }: Notif
 
   const markAllAsReadMutation = useMutation({
     mutationFn: async () => {
-      return apiRequest('/api/notifications/mark-all-read', {
-        method: 'POST',
-      });
+      return apiRequest('POST', '/api/notifications/mark-all-read');
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/notifications'] });
@@ -207,7 +203,7 @@ export default function NotificationsClient({ initialNotifications = [] }: Notif
                             {notification.message}
                           </p>
                           <div className="flex items-center gap-3 mt-2">
-                            <p className="text-xs text-muted-foreground">
+                            <p suppressHydrationWarning className="text-xs text-muted-foreground">
                               {formatDistanceToNow(new Date(notification.createdAt), { addSuffix: true })}
                             </p>
                             <Badge variant="outline" className="text-xs">

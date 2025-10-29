@@ -2,6 +2,7 @@
 
 import { MessageSquare, Users, MessagesSquare, Activity } from "lucide-react";
 import { useRealtimeUpdates } from "@/hooks/useRealtimeUpdates";
+import { RefreshButton } from "./RefreshButton";
 
 interface StatsData {
   totalThreads: number;
@@ -14,8 +15,8 @@ interface StatsData {
 }
 
 export default function StatsBar() {
-  // Auto-refresh stats every 30 seconds
-  const { data, isLoading } = useRealtimeUpdates<StatsData>('/api/stats', { interval: 30000 });
+  // No auto-refresh for performance
+  const { data, isLoading, refetch } = useRealtimeUpdates<StatsData>('/api/stats', { interval: false });
 
   const stats = [
     { 
@@ -47,8 +48,8 @@ export default function StatsBar() {
   if (isLoading && !data) {
     return (
       <div className="border-y bg-muted/30">
-        <div className="container max-w-7xl mx-auto px-4 py-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+        <div className="container max-w-7xl mx-auto px-4 py-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[1, 2, 3, 4].map((i) => (
               <div key={i} className="flex items-center gap-3 animate-pulse">
                 <div className="bg-muted rounded-lg h-11 w-11" />
@@ -66,8 +67,16 @@ export default function StatsBar() {
 
   return (
     <div className="border-y bg-muted/30">
-      <div className="container max-w-7xl mx-auto px-4 py-6">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+      <div className="container max-w-7xl mx-auto px-4 py-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-xs text-muted-foreground">Platform Statistics</div>
+          <RefreshButton 
+            onRefresh={async () => { await refetch(); }}
+            size="icon"
+            variant="ghost"
+          />
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {stats.map((stat) => (
             <div key={stat.key} className="flex items-center gap-3">
               <div className="bg-primary/10 dark:bg-primary/20 rounded-lg p-2.5">
@@ -75,7 +84,7 @@ export default function StatsBar() {
               </div>
               <div>
                 <div className="text-2xl font-bold" data-testid={`text-stat-${stat.key}`}>{stat.value}</div>
-                <div className="text-sm text-muted-foreground font-medium">{stat.label}</div>
+                <div className="text-sm text-muted-foreground font-medium truncate">{stat.label}</div>
               </div>
             </div>
           ))}

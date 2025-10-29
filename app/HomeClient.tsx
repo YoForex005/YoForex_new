@@ -14,8 +14,6 @@ import WhatsHot from "@/components/WhatsHot";
 import TopSellers from "@/components/TopSellers";
 import EnhancedFooter from "@/components/EnhancedFooter";
 import { OnboardingChecklist } from "@/components/OnboardingChecklist";
-import { DailyEarnings } from "@/components/DailyEarnings";
-import { useActivityTracker } from "@/hooks/useActivityTracker";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { 
@@ -78,23 +76,18 @@ export default function HomeClient({
   initialCategories, 
   initialThreads 
 }: HomeClientProps) {
-  // Enable activity tracking for earning coins
-  useActivityTracker(true);
-
-  // Fetch top categories with 60s auto-refresh (for homepage display)
+  // Fetch top categories (no auto-refresh for performance)
   const { data: categoriesData, isLoading: isLoadingCategories } = useQuery({
     queryKey: ['/api/categories/tree/top?limit=6'],
     initialData: initialCategories,
-    refetchInterval: 60000, // Auto-refresh every 60 seconds
-    staleTime: 50000,
+    staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
-  // Fetch real threads with 60s auto-refresh
+  // Fetch real threads (no auto-refresh for performance)
   const { data: threadsData, isLoading: isLoadingThreads } = useQuery({
     queryKey: ['/api/threads'],
     initialData: initialThreads,
-    refetchInterval: 60000, // Auto-refresh every 60 seconds
-    staleTime: 50000,
+    staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
   // Flatten category tree for use in CategoryTree component
@@ -132,16 +125,15 @@ export default function HomeClient({
       <Header />
       <StatsBar />
       
-      <main className="container max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-6">
+      <main className="container max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-4">
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-3 sm:gap-4">
-          <aside className="lg:col-span-1 space-y-3 sm:space-y-4 order-2 lg:order-1">
+          <aside className="lg:col-span-1 space-y-3 order-2 lg:order-1">
             <OnboardingChecklist />
-            <DailyEarnings />
             <CoinBalance />
             <TrustLevel />
           </aside>
 
-          <div className="lg:col-span-2 space-y-4 sm:space-y-6 order-1 lg:order-2">
+          <div className="lg:col-span-2 space-y-3 sm:space-y-4 order-1 lg:order-2">
             <section>
               <WeekHighlights />
             </section>
@@ -178,7 +170,7 @@ export default function HomeClient({
             </section>
           </div>
 
-          <aside className="lg:col-span-1 space-y-3 sm:space-y-4 order-3">
+          <aside className="lg:col-span-1 space-y-3 order-3">
             <WhatsHot />
             <TopSellers />
             <Leaderboard />
